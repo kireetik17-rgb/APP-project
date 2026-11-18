@@ -1,0 +1,491 @@
+"""
+TEA Kadai Tab Book  (Tkinter desktop edition)
+A tiny ledger for a roadside chai stall.
+
+Run:  python "TEA Kadai APP.py"
+Needs only the Python standard library (tkinter ships with Python).
+Tabs are saved to chai_tabs.json next to this file.
+"""
+
+import json
+import os
+import tkinter as tk
+from datetime import datetime
+from tkinter import messagebox, ttk
+
+SAVE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chai_tabs.json")
+
+MENU = [
+    {"id": 1, "name": "Masala Chai",   "price": 15, "emoji": "🍵", "cat": "drink"},
+    {"id": 2, "name": "Irani Chai",    "price": 20, "emoji": "☕", "cat": "drink"},
+    {"id": 3, "name": "Filter Coffee", "price": 20, "emoji": "☕", "cat": "drink"},
+    {"id": 4, "name": "Lemon Tea",     "price": 18, "emoji": "🍋", "cat": "drink"},
+    {"id": 5, "name": "Samosa",        "price": 12, "emoji": "🥟", "cat": "snack"},
+    {"id": 6, "name": "Bun Maska",     "price": 25, "emoji": "🍞", "cat": "snack"},
+    {"id": 7, "name": "Maggi",         "price": 40, "emoji": "🍜", "cat": "snack"},
+    {"id": 8, "name": "Biscuits",      "price": 10, "emoji": "🍪", "cat": "snack"},
+]
+
+LIGHT = {"bg": "#f6ecd9", "paper": "#fffaf0", "ink": "#3b2a1e", "muted": "#8a7563",
+         "accent": "#c4541c", "green": "#2f6b4f", "line": "#e4d3b4", "danger": "#b3261e"}
+DARK = {"bg": "#1f1812", "paper": "#2a2018", "ink": "#f3e6d2", "muted": "#b09c85",
+        "accent": "#ee7b3f", "green": "#3f8f68", "line": "#43362a", "danger": "#ff8a80"}
+
+
+def rupee(n):
+    n = round(n, 2)
+    return "₹%g" % n
+
+
+class FlatButton(tk.Label):
+    """A label that behaves like a button.
+    macOS ignores background colours on tk.Button, so we draw our own."""
+
+    def __init__(self, parent, text, command, **kw):
+        super().__init__(parent, text=text, relief="solid", bd=2, cursor="hand2", **kw)
+        self._command = command
+        self.bind("<ButtonPress-1>", lambda e: self.config(relief="sunken"))
+        self.bind("<ButtonRelease-1>", self._release)
+
+    def _release(self, e):
+        self.config(relief="solid")
+        # only fire if the mouse is still over the button
+        if 0 <= e.x <= self.winfo_width() and 0 <= e.y <= self.winfo_height():
+            self._command()
+
+
+class TeaKadai(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("TEA Kadai Tab Book")
+        self.geometry("1100x720")
+        self.minsize(900, 600)
+
+        # app state
+        self.order = {}          # item id -> qty
+        self.tabs = []           # saved entries
+        self.dark = False
+        self.category = "all"
+
+        # these survive a theme rebuild
+        self.search_var = tk.StringVar()
+        self.name_var = tk.StringVar()
+        self.tip_var = tk.StringVar(value="0")
+        self.people_var = tk.StringVar(value="1")
+        self.filter_var = tk.StringVar(value="All entries")
+        for v in (self.tip_var, self.people_var):
+            v.trace_add("write", lambda *_: self.refresh_totals())
+        self.search_var.trace_add("write", lambda *_: self.refresh_menu())
+
+        self.load()
+        self.build_ui()
+
+        # on macOS the window can open behind the editor, so pull it to the front
+        self.lift()
+        self.attributes("-topmost", True)
+        self.after(400, lambda: self.attributes("-topmost", False))
+        self.focus_force()
+
+    # ---------- storage ----------
+    def load(self):
+        try:
+            with open(SAVE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.tabs = data.get("tabs", [])
+            self.dark = data.get("dark", False)
+        except (OSError, ValueError):
+            self.tabs = []
+
+    def save(self):
+        try:
+            with open(SAVE_FILE, "w", encoding="utf-8") as f:
+                json.dump({"tabs": self.tabs, "dark": self.dark}, f, indent=2, ensure_ascii=False)
+        except OSError:
+            self.toast("Couldn't save the file :(")
+
+    # ---------- UI ----------
+    @property
+    def c(self):
+        return DARK if self.dark else LIGHT
+
+    def btn(self, parent, text, cmd, kind="plain", small=False):
+        c = self.c
+        colors = {"plain": (c["paper"], c["ink"]), "primary": (c["accent"], "#ffffff"),
+                  "green": (c["green"], "#ffffff"), "danger": (c["paper"], c["danger"])}
+        bg, fg = colors[kind]
+        return FlatButton(parent, text, cmd, bg=bg, fg=fg,
+                          font=("Segoe UI", 9 if small else 10, "bold" if kind == "primary" else "normal"),
+                          padx=8 if small else 12, pady=1 if small else 5)
+
+    def card(self, parent, title):
+        c = self.c
+        outer = tk.Frame(parent, bg=c["ink"], padx=2, pady=2)
+        inner = tk.Frame(outer, bg=c["paper"], padx=14, pady=12)
+        inner.pack(fill="both", expand=True)
+        tk.Label(inner, text=title, bg=c["paper"], fg=c["ink"],
+                 font=("Georgia", 14, "bold")).pack(anchor="w", pady=(0, 8))
+        return outer, inner
+
+    def build_ui(self):
+        for w in self.winfo_children():
+            w.destroy()
+        c = self.c
+        self.configure(bg=c["bg"])
+
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure("Tab.Treeview", background=c["paper"], fieldbackground=c["paper"],
+                        foreground=c["ink"], rowheight=28, borderwidth=0, font=("Segoe UI", 10))
+        style.configure("Tab.Treeview.Heading", background=c["line"], foreground=c["ink"],
+                        font=("Segoe UI", 10, "bold"))
+        style.map("Tab.Treeview", background=[("selected", c["accent"])],
+                  foreground=[("selected", "#ffffff")])
+        style.configure("TCombobox", fieldbackground=c["bg"], background=c["paper"],
+                        foreground=c["ink"])
+
+        # header
+        head = tk.Frame(self, bg=c["bg"])
+        head.pack(fill="x", padx=20, pady=(16, 6))
+        left = tk.Frame(head, bg=c["bg"])
+        left.pack(side="left")
+        title = tk.Frame(left, bg=c["bg"])
+        title.pack(anchor="w")
+        tk.Label(title, text="TEA ", bg=c["bg"], fg=c["ink"], font=("Georgia", 22, "bold")).pack(side="left")
+        tk.Label(title, text="Kadai ", bg=c["bg"], fg=c["accent"], font=("Georgia", 22, "bold")).pack(side="left")
+        tk.Label(title, text="Tab Book", bg=c["bg"], fg=c["ink"], font=("Georgia", 22, "bold")).pack(side="left")
+        tk.Label(left, text='"Anna, Kanakku ezhudhunga" — the corner stall ledger, now on your desktop.',
+                 bg=c["bg"], fg=c["muted"], font=("Georgia", 10, "italic")).pack(anchor="w")
+        self.btn(head, "☀ Day shift" if self.dark else "🌙 Night shift", self.toggle_theme).pack(side="right")
+
+        # status bar (our "toast")
+        self.status = tk.Label(self, text="Ready.", bg=c["ink"], fg=c["paper"],
+                               anchor="w", padx=12, pady=4, font=("Segoe UI", 9))
+        self.status.pack(side="bottom", fill="x")
+
+        body = tk.Frame(self, bg=c["bg"])
+        body.pack(fill="both", expand=True, padx=20, pady=10)
+        body.columnconfigure(0, weight=3)
+        body.columnconfigure(1, weight=2)
+        body.rowconfigure(0, weight=1)
+
+        # ----- left column -----
+        left_col = tk.Frame(body, bg=c["bg"])
+        left_col.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        left_col.rowconfigure(1, weight=1)
+        left_col.columnconfigure(0, weight=1)
+
+        menu_outer, menu_in = self.card(left_col, "☕ Today's Menu")
+        menu_outer.grid(row=0, column=0, sticky="ew")
+
+        bar = tk.Frame(menu_in, bg=c["paper"])
+        bar.pack(fill="x", pady=(0, 8))
+        tk.Entry(bar, textvariable=self.search_var, bg=c["bg"], fg=c["ink"],
+                 insertbackground=c["ink"], relief="solid", bd=1,
+                 font=("Segoe UI", 10)).pack(side="left", fill="x", expand=True, ipady=4, padx=(0, 8))
+        self.chips = {}
+        for key, label in (("all", "All"), ("drink", "Drinks"), ("snack", "Snacks")):
+            b = self.btn(bar, label, lambda k=key: self.set_category(k), small=True)
+            b.pack(side="left", padx=2)
+            self.chips[key] = b
+        self.menu_grid = tk.Frame(menu_in, bg=c["paper"])
+        self.menu_grid.pack(fill="x")
+
+        order_outer, order_in = self.card(left_col, "🧾 Current Order")
+        order_outer.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
+
+        nm = tk.Frame(order_in, bg=c["paper"])
+        nm.pack(fill="x")
+        tk.Label(nm, text="Customer:", bg=c["paper"], fg=c["muted"]).pack(side="left")
+        tk.Entry(nm, textvariable=self.name_var, bg=c["bg"], fg=c["ink"], insertbackground=c["ink"],
+                 relief="solid", bd=1, font=("Segoe UI", 10)).pack(side="left", fill="x", expand=True,
+                                                                  padx=8, ipady=3)
+        self.order_box = tk.Frame(order_in, bg=c["paper"])
+        self.order_box.pack(fill="both", expand=True, pady=6)
+
+        self.totals_box = tk.Frame(order_in, bg=c["paper"])
+        self.totals_box.pack(fill="x")
+
+        opts = tk.Frame(order_in, bg=c["paper"])
+        opts.pack(fill="x", pady=6)
+        tk.Label(opts, text="Tip ₹", bg=c["paper"], fg=c["muted"]).pack(side="left")
+        tk.Spinbox(opts, from_=0, to=1000, width=5, textvariable=self.tip_var, bg=c["bg"], fg=c["ink"],
+                   insertbackground=c["ink"]).pack(side="left", padx=(4, 14))
+        tk.Label(opts, text="Split between", bg=c["paper"], fg=c["muted"]).pack(side="left")
+        tk.Spinbox(opts, from_=1, to=50, width=4, textvariable=self.people_var, bg=c["bg"], fg=c["ink"],
+                   insertbackground=c["ink"]).pack(side="left", padx=4)
+
+        acts = tk.Frame(order_in, bg=c["paper"])
+        acts.pack(fill="x")
+        self.btn(acts, "Write on tab", self.write_tab, "primary").pack(side="left")
+        self.btn(acts, "Clear order", self.clear_order, "danger").pack(side="left", padx=8)
+
+        # ----- right column: tab book -----
+        tab_outer, tab_in = self.card(body, "📒 The Tab Book")
+        tab_outer.grid(row=0, column=1, sticky="nsew")
+
+        summ = tk.Frame(tab_in, bg=c["paper"])
+        summ.pack(fill="x")
+        self.pending_lbl = tk.Label(summ, bg=c["paper"], fg=c["accent"], font=("Segoe UI", 10, "bold"))
+        self.pending_lbl.pack(side="left")
+        self.paid_lbl = tk.Label(summ, bg=c["paper"], fg=c["green"], font=("Segoe UI", 10, "bold"))
+        self.paid_lbl.pack(side="right")
+
+        tools = tk.Frame(tab_in, bg=c["paper"])
+        tools.pack(fill="x", pady=8)
+        combo = ttk.Combobox(tools, textvariable=self.filter_var, state="readonly", width=14,
+                             values=["All entries", "Unpaid only", "Paid only"])
+        combo.pack(side="left")
+        combo.bind("<<ComboboxSelected>>", lambda e: self.refresh_tabs())
+        self.btn(tools, "Wipe paid", self.wipe_paid, "danger", small=True).pack(side="right")
+
+        cols = ("name", "total", "status", "date")
+        self.tree = ttk.Treeview(tab_in, columns=cols, show="headings", style="Tab.Treeview",
+                                 selectmode="browse")
+        for col, text, w in (("name", "Customer", 120), ("total", "Total", 70),
+                             ("status", "Status", 70), ("date", "Date", 70)):
+            self.tree.heading(col, text=text)
+            self.tree.column(col, width=w, anchor="w")
+        self.tree.pack(fill="both", expand=True)
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self.show_detail())
+        self.tree.tag_configure("paid", foreground=c["muted"])
+
+        self.detail = tk.Label(tab_in, text="Select an entry to see what was ordered.",
+                               bg=c["paper"], fg=c["muted"], wraplength=320, justify="left",
+                               font=("Segoe UI", 9, "italic"))
+        self.detail.pack(fill="x", pady=6)
+
+        row = tk.Frame(tab_in, bg=c["paper"])
+        row.pack(fill="x")
+        self.btn(row, "Mark paid / unpaid", self.toggle_paid, "green", small=True).pack(side="left")
+        self.btn(row, "Delete", self.delete_entry, "danger", small=True).pack(side="left", padx=8)
+
+        self.refresh_menu()
+        self.refresh_order()
+        self.refresh_tabs()
+        self.set_category(self.category)
+
+    # ---------- helpers ----------
+    def toast(self, msg):
+        self.status.config(text=msg)
+        self.after(2500, lambda: self.status.winfo_exists() and self.status.config(text="Ready."))
+
+    def item(self, item_id):
+        return next(m for m in MENU if m["id"] == item_id)
+
+    def subtotal(self):
+        return sum(self.item(i)["price"] * q for i, q in self.order.items())
+
+    def tip(self):
+        try:
+            return max(0, float(self.tip_var.get()))
+        except ValueError:
+            return 0
+
+    def people(self):
+        try:
+            return max(1, int(self.people_var.get()))
+        except ValueError:
+            return 1
+
+    # ---------- menu ----------
+    def set_category(self, key):
+        self.category = key
+        c = self.c
+        for k, b in self.chips.items():
+            if k == key:
+                b.config(bg=c["ink"], fg=c["paper"])
+            else:
+                b.config(bg=c["paper"], fg=c["ink"])
+        self.refresh_menu()
+
+    def refresh_menu(self):
+        if not hasattr(self, "menu_grid"):
+            return
+        c = self.c
+        for w in self.menu_grid.winfo_children():
+            w.destroy()
+        q = self.search_var.get().strip().lower()
+        items = [m for m in MENU if (self.category == "all" or m["cat"] == self.category)
+                 and q in m["name"].lower()]
+        if not items:
+            tk.Label(self.menu_grid, text="Nothing like that on the menu 🤷", bg=c["paper"],
+                     fg=c["muted"], font=("Segoe UI", 10, "italic")).pack(pady=14)
+            return
+        for idx, m in enumerate(items):
+            cell = tk.Frame(self.menu_grid, bg=c["bg"], highlightbackground=c["line"],
+                            highlightthickness=2, padx=8, pady=8)
+            cell.grid(row=idx // 4, column=idx % 4, padx=5, pady=5, sticky="nsew")
+            tk.Label(cell, text=m["emoji"], bg=c["bg"], font=("Segoe UI Emoji", 20)).pack()
+            tk.Label(cell, text=m["name"], bg=c["bg"], fg=c["ink"], font=("Segoe UI", 10, "bold")).pack()
+            tk.Label(cell, text=rupee(m["price"]), bg=c["bg"], fg=c["muted"]).pack()
+            self.btn(cell, "+ Add", lambda i=m["id"]: self.add_item(i), "primary", small=True).pack(pady=(4, 0))
+        for col in range(4):
+            self.menu_grid.columnconfigure(col, weight=1, uniform="menu")
+
+    # ---------- order ----------
+    def add_item(self, item_id):
+        self.order[item_id] = self.order.get(item_id, 0) + 1
+        self.toast(self.item(item_id)["name"] + " added")
+        self.refresh_order()
+
+    def change_qty(self, item_id, delta):
+        self.order[item_id] = self.order.get(item_id, 0) + delta
+        if self.order[item_id] <= 0:
+            del self.order[item_id]
+        self.refresh_order()
+
+    def remove_item(self, item_id):
+        self.order.pop(item_id, None)
+        self.refresh_order()
+
+    def refresh_order(self):
+        c = self.c
+        for w in self.order_box.winfo_children():
+            w.destroy()
+        if not self.order:
+            tk.Label(self.order_box, text='No items yet. Tap "+ Add" on the menu.', bg=c["paper"],
+                     fg=c["muted"], font=("Segoe UI", 10, "italic")).pack(pady=10)
+        for item_id, qty in self.order.items():
+            m = self.item(item_id)
+            row = tk.Frame(self.order_box, bg=c["paper"])
+            row.pack(fill="x", pady=2)
+            tk.Label(row, text=f'{m["emoji"]} {m["name"]}', bg=c["paper"], fg=c["ink"],
+                     width=18, anchor="w").pack(side="left")
+            self.btn(row, "−", lambda i=item_id: self.change_qty(i, -1), small=True).pack(side="left")
+            tk.Label(row, text=str(qty), bg=c["paper"], fg=c["ink"], width=3,
+                     font=("Segoe UI", 10, "bold")).pack(side="left")
+            self.btn(row, "+", lambda i=item_id: self.change_qty(i, 1), small=True).pack(side="left")
+            tk.Label(row, text=rupee(m["price"] * qty), bg=c["paper"], fg=c["ink"],
+                     width=8, anchor="e").pack(side="left", padx=6)
+            self.btn(row, "✕", lambda i=item_id: self.remove_item(i), "danger", small=True).pack(side="left")
+        self.refresh_totals()
+
+    def refresh_totals(self):
+        if not hasattr(self, "totals_box"):
+            return
+        c = self.c
+        for w in self.totals_box.winfo_children():
+            w.destroy()
+        sub, tip, ppl = self.subtotal(), self.tip(), self.people()
+        total = sub + tip
+
+        def line(label, value, bold=False):
+            r = tk.Frame(self.totals_box, bg=c["paper"])
+            r.pack(fill="x")
+            f = ("Segoe UI", 13 if bold else 10, "bold" if bold else "normal")
+            tk.Label(r, text=label, bg=c["paper"], fg=c["ink"], font=f).pack(side="left")
+            tk.Label(r, text=value, bg=c["paper"], fg=c["ink"], font=f).pack(side="right")
+
+        tk.Frame(self.totals_box, bg=c["ink"], height=2).pack(fill="x", pady=4)
+        line("Subtotal", rupee(sub))
+        line("Tip", rupee(tip))
+        line("Total", rupee(total), bold=True)
+        if ppl > 1:
+            line(f"Each of {ppl} pays", rupee(total / ppl))
+
+    def clear_order(self):
+        if not self.order:
+            self.toast("Nothing to clear")
+            return
+        self.order.clear()
+        self.tip_var.set("0")
+        self.people_var.set("1")
+        self.refresh_order()
+        self.toast("Order cleared")
+
+    def write_tab(self):
+        if not self.order:
+            self.toast("Add something first!")
+            return
+        summary = ", ".join(f"{q}× {self.item(i)['name']}" for i, q in self.order.items())
+        self.tabs.insert(0, {
+            "id": int(datetime.now().timestamp() * 1000),
+            "name": self.name_var.get().strip() or "Walk-in customer",
+            "summary": summary,
+            "total": self.subtotal() + self.tip(),
+            "paid": False,
+            "date": datetime.now().strftime("%d %b"),
+        })
+        self.save()
+        self.order.clear()
+        self.name_var.set("")
+        self.tip_var.set("0")
+        self.people_var.set("1")
+        self.refresh_order()
+        self.refresh_tabs()
+        self.toast("Written in the book ✍️")
+
+    # ---------- tab book ----------
+    def visible_tabs(self):
+        f = self.filter_var.get()
+        if f == "Unpaid only":
+            return [t for t in self.tabs if not t["paid"]]
+        if f == "Paid only":
+            return [t for t in self.tabs if t["paid"]]
+        return self.tabs
+
+    def refresh_tabs(self):
+        for row in self.tree.get_children():
+            self.tree.delete(row)
+        for t in self.visible_tabs():
+            self.tree.insert("", "end", iid=str(t["id"]),
+                             values=(t["name"], rupee(t["total"]), "Paid" if t["paid"] else "Unpaid", t["date"]),
+                             tags=("paid",) if t["paid"] else ())
+        pending = sum(t["total"] for t in self.tabs if not t["paid"])
+        paid = sum(t["total"] for t in self.tabs if t["paid"])
+        self.pending_lbl.config(text=f"Pending: {rupee(pending)}")
+        self.paid_lbl.config(text=f"Collected: {rupee(paid)}")
+        self.show_detail()
+
+    def selected(self):
+        sel = self.tree.selection()
+        if not sel:
+            return None
+        return next((t for t in self.tabs if str(t["id"]) == sel[0]), None)
+
+    def show_detail(self):
+        t = self.selected()
+        self.detail.config(text=f'{t["name"]}: {t["summary"]}' if t
+                           else "Select an entry to see what was ordered.")
+
+    def toggle_paid(self):
+        t = self.selected()
+        if not t:
+            self.toast("Pick an entry first")
+            return
+        t["paid"] = not t["paid"]
+        self.save()
+        self.refresh_tabs()
+        self.toast(f'{t["name"]} settled 🎉' if t["paid"] else "Marked unpaid")
+
+    def delete_entry(self):
+        t = self.selected()
+        if not t:
+            self.toast("Pick an entry first")
+            return
+        if messagebox.askyesno("Delete entry", f'Delete the entry for {t["name"]}?'):
+            self.tabs = [x for x in self.tabs if x["id"] != t["id"]]
+            self.save()
+            self.refresh_tabs()
+            self.toast("Entry deleted")
+
+    def wipe_paid(self):
+        n = sum(1 for t in self.tabs if t["paid"])
+        if not n:
+            self.toast("No paid entries to wipe")
+            return
+        if messagebox.askyesno("Wipe paid", f"Remove {n} paid entr{'ies' if n > 1 else 'y'}?"):
+            self.tabs = [t for t in self.tabs if not t["paid"]]
+            self.save()
+            self.refresh_tabs()
+            self.toast("Paid entries wiped")
+
+    # ---------- theme ----------
+    def toggle_theme(self):
+        self.dark = not self.dark
+        self.save()
+        self.build_ui()
+
+
+if __name__ == "__main__":
+    TeaKadai().mainloop()
